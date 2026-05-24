@@ -1,119 +1,159 @@
 # cross-agent-handoff
 
-Pass **task state** across AI coding tools — Cursor, Claude Code, Codex, Antigravity CLI/desktop, and project chat — without copying full chat transcripts.
+[![CI](https://github.com/HN-Tran/cross-agent-handoff/actions/workflows/ci.yml/badge.svg)](https://github.com/HN-Tran/cross-agent-handoff/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Shell](https://img.shields.io/badge/Shell-bash-4EAA25?logo=gnu-bash&logoColor=white)](bin/cross-agent-handoff)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
 
-**Handoff, not sync:** this tool passes a structured baton (`.agent/SESSION.md` + optional digest). It does not replicate full history or keep all agents identical.
+Pass **task state** across AI coding tools — Cursor, Claude Code, Codex, Antigravity, and project chat — without copying full chat transcripts.
 
-Tags: `cross-agent` `session-handoff` `cursor` `claude-code` `codex` `antigravity`
+> **Handoff, not sync.** A structured baton (`.agent/SESSION.md` + optional digest), not full history replication.  
+> Host paths, host git state — whether hooks run natively or via Docker, the files land on your machine.
+
+---
+
+## Features
+
+- **Session inject** on start — agents read `.agent/SESSION.md` automatically  
+- **Stop enforcement** — block finish until handoff is updated  
+- **Git capture** — branch, dirty files, recent commits in `.agent/state.json`  
+- **Project chat** — `export-for-project` / `import` for ChatGPT, Claude, Gemini Projects  
+- **Native or Docker** — bash hooks on the host, or `docker compose exec` + `.env`
 
 ## How it works
 
 | Layer | File | What it holds |
 |-------|------|----------------|
-| Static | `AGENTS.md` | Conventions, build commands (`CLAUDE.md` → symlink for Claude Code) |
+| Static | `AGENTS.md` | Conventions (`CLAUDE.md` → symlink for Claude Code) |
 | Dynamic | `.agent/SESSION.md` | Goal, progress, next steps, decisions, blockers, **context digest** |
-| Execution | `.agent/state.json` | Branch, dirty files, recent commits (auto-captured) |
-| Archive | `.agent/archive/` | Full transcript copies (reference only; not injected whole) |
+| Execution | `.agent/state.json` | Branch, dirty files, timestamps (auto) |
+| Archive | `.agent/archive/` | Transcript copies (reference only) |
 
-On **session start**, hooks inject `SESSION.md` into the agent context. On **stop**, hooks require an updated handoff before the agent can finish. On **session end**, git state is captured in the background.
+```mermaid
+flowchart LR
+  A[Cursor / Claude / Codex] -->|hooks| B[SESSION.md + state.json]
+  B -->|same repo| C[Next tool resumes]
+```
 
 ## Install
+
+### Native (recommended for daily use)
 
 ```bash
 git clone https://github.com/HN-Tran/cross-agent-handoff.git
 cd cross-agent-handoff
-./install-global.sh --link    # ~/.local/bin/cross-agent-handoff + ~/.local/share/
+./install-global.sh --link    # ~/.local/bin/cross-agent-handoff
 ```
 
-Optional CLI alias: `cah`
+Alias: `cah`
+
+### Docker (compose + `.env`)
+
+```bash
+./install-global.sh --docker   # writes ~/.env, wires docker compose exec hooks
+cd ~/.local/share/cross-agent-handoff
+docker compose up -d --build
+
+docker compose exec -w "$HOME/GitHub/your-repo" cli -- init
+```
+
+See [`.env.example`](.env.example) for `HOME`, `UID`, `GID`, and optional clipboard (`COMPOSE_FILE=...clipboard.yml`).
+
+| | Native | Docker |
+|--|--------|--------|
+| Install | `install-global [--link]` | `install-global --docker` + `up -d` |
+| Hooks | Host bash adapters | `docker compose exec` (daemon required) |
+| Effect on disk | Same — `.agent/` in your git repo | Same — `$HOME` bind mount |
+
+After install: **restart Cursor**; run **`codex /hooks`** to trust Codex hooks.
 
 ## Quick start (per repo)
 
 ```bash
 cd your-git-repo
 cross-agent-handoff init
-# Edit .agent/SESSION.md with your current task
+# Edit .agent/SESSION.md — goal, progress, next steps
 ```
 
-For **cloud agents** that clone from GitHub (no access to gitignored files):
+**Cloud agents** (no gitignored files on the VM):
 
 ```bash
-cross-agent-handoff init --web-mode   # keeps .agent/ committable
+cross-agent-handoff init --web-mode
 git add .agent/SESSION.md && git commit -m "chore: session handoff" && git push
 ```
+
+## Validate your setup (pilot checklist)
+
+Use this once on a real repo (e.g. `automation-workflows`):
+
+1. `cross-agent-handoff init`  
+2. Fill `.agent/SESSION.md` with a real task  
+3. **Cursor** — start session → confirm handoff context appears; stop → confirm SESSION was updated (or stop hook nudges you)  
+4. **Claude Code / Codex** — open same repo → agent continues from SESSION + correct branch  
+5. Optional: `export-for-project --clipboard` → project chat → `import --from-clipboard`  
+6. Optional: `digest` after sessions with transcript archives  
+
+Hooks always affect the **host tree** (or a bind-mounted `$HOME` in Docker) — runtime location does not change where handoff files live.
 
 ## CLI
 
 | Command | Purpose |
 |---------|---------|
-| `init [--web-mode] [DIR]` | Create `.agent/`, templates, AGENTS section, repo hook stubs |
-| `capture [--tool NAME] [--transcript PATH]` | Write `state.json` (+ optional archive) |
-| `export-for-project [--clipboard]` | Brief handoff for ChatGPT/Claude/Gemini Projects |
-| `import --from-clipboard \| --from-file PATH` | Pull project-chat updates into `SESSION.md` |
-| `digest` | Show latest archive tail; hints for context digest |
-| `install-global [--link]` | Install CLI + wire user-level hooks |
+| `init [--web-mode] [DIR]` | `.agent/`, templates, AGENTS section, repo hook stubs |
+| `capture [--tool NAME] [--transcript PATH]` | Update `state.json` (+ archive) |
+| `export-for-project [--clipboard]` | Brief for project chat |
+| `import --from-clipboard \| --from-file PATH` | Pull project-chat text into SESSION |
+| `digest` | Latest archive tail + digest hints |
+| `install-global [--link] [--docker]` | CLI + user-level hooks (native or compose) |
 
-## Hooks (Tier A — local CLIs)
-
-After `install-global`:
+## Hooks (Tier A)
 
 | Tool | Config | Events |
 |------|--------|--------|
 | Cursor | `~/.cursor/hooks.json` | `sessionStart`, `stop`, `sessionEnd` |
 | Claude Code | `~/.claude/settings.json` | `SessionStart`, `Stop`, `SessionEnd` |
-| Codex | `~/.codex/hooks.json` | `SessionStart`, `Stop` (no SessionEnd) |
+| Codex | `~/.codex/hooks.json` | `SessionStart`, `Stop` |
 | Antigravity CLI | `~/.gemini/antigravity-cli/settings.json` | `SessionStart`, `AfterAgent`, `SessionEnd` |
 
-**Codex:** run `codex /hooks` once to review and trust hooks.
-
-**Cursor:** restart the IDE after install so `hooks.json` reloads (requires Cursor v2.4+).
-
-`init` also writes **repo-level** hook stubs (`.cursor/hooks.json`, `.claude/settings.json`, etc.) for cloud sessions (Tier B).
+`init` adds **repo-level** stubs for Tier B (cloud). Cursor v2.4+ required for `sessionStart` / `sessionEnd`.
 
 ## Project chat (Tier C)
 
 ```bash
 cross-agent-handoff export-for-project --clipboard
-# Paste into your project instructions or upload SESSION.brief.md
-
 cross-agent-handoff import --from-clipboard
-# After editing in the project UI, pull text back into the repo
 ```
 
-See [`templates/project-instructions.md`](templates/project-instructions.md) for paste-ready project rules.
+[`templates/project-instructions.md`](templates/project-instructions.md) — paste into project settings.
 
-## Coverage tiers
+## Coverage
 
-| Tier | Tools | Automation |
-|------|-------|------------|
-| A | Cursor, Claude Code, Codex, Antigravity CLI | Full hooks |
-| B | Cursor Cloud, Claude web, etc. | Repo-committed hooks + pushed `SESSION.md` |
-| C+ | ChatGPT / Claude / Gemini Projects | `export-for-project` / `import` |
-| D | Ad hoc chat | Manual paste |
+| Tier | Tools | How |
+|------|-------|-----|
+| A | Local CLIs | Hooks |
+| B | Cloud coding agents | Committed hooks + pushed `SESSION.md` |
+| C+ | Project chat | export / import |
+| D | Ad hoc | Manual paste |
 
-## Architecture
+## Development
 
+```bash
+# CI runs the same checks locally:
+./scripts/ci-smoke.sh
+
+# Dev compose (live-mount sources):
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
-cross-agent-handoff/
-  bin/cross-agent-handoff      # CLI
-  lib/common.sh                # shared helpers
-  hooks/
-    session-start.sh           # core logic
-    stop-enforce-handoff.sh
-    session-end.sh
-    archive-transcript.sh
-    adapters/                  # per-tool JSON output
-  templates/
-```
-
-Core shell scripts hold the logic; thin adapters emit each tool’s hook JSON (`additional_context`, `followup_message`, `decision: block`, etc.).
 
 ## Troubleshooting
 
-- **Hooks not firing:** check executable bits, paths in config, and tool-specific trust (`codex /hooks`).
-- **Stop loop:** update `.agent/SESSION.md` (Goal, Progress, Next steps, Decisions, Blockers, Context digest) then stop again.
-- **Cloud agent missing context:** use `init --web-mode` and commit `SESSION.md`, or push after local updates.
+| Issue | Fix |
+|-------|-----|
+| Hooks not firing | Executable bits, paths, `codex /hooks`, restart Cursor |
+| Stop loop | Update all SESSION sections, then stop again |
+| Docker hook empty | `docker compose up -d`; check `docker ps` |
+| Cloud missing context | `init --web-mode` + commit `SESSION.md` |
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+[Apache-2.0](LICENSE)

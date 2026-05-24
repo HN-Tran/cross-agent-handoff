@@ -1,0 +1,11 @@
+# Optional: mount one repo at /workspace instead of all of $HOME.
+# In .env set:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.workspace.yml
+#   WORKSPACE=/absolute/path/to/repo
+# Hooks must use paths under that repo only.
+
+services:
+  cli:
+    working_dir: /workspace
+    volumes:
+      - ${WORKSPACE:?Set WORKSPACE in .env}:/workspace

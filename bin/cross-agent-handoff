@@ -23,7 +23,7 @@ Usage:
   cross-agent-handoff export-for-project [--clipboard]
   cross-agent-handoff import --from-clipboard | --from-file PATH
   cross-agent-handoff digest
-  cross-agent-handoff install-global [--link]
+  cross-agent-handoff install-global [--link] [--docker] [--docker]
   cross-agent-handoff hook <event> <format>   # internal: for lifecycle hooks
 
 Events: session-start | stop | session-end | archive
@@ -296,8 +296,14 @@ cmd_digest() {
 }
 
 cmd_install_global() {
-  local link=0
-  [[ "${1:-}" == "--link" ]] && link=1
+  local link=0 docker_mode=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --link) link=1; shift ;;
+      --docker) docker_mode=1; shift ;;
+      *) echo "Unknown install-global option: $1" >&2; exit 1 ;;
+    esac
+  done
   local share="$HOME/.local/share/cross-agent-handoff"
   local bin_dir="$HOME/.local/bin"
   mkdir -p "$bin_dir"
@@ -314,11 +320,169 @@ cmd_install_global() {
   ln -sfn "$share/bin/cross-agent-handoff" "$bin_dir/cah" 2>/dev/null || true
   chmod +x "$share/bin/cross-agent-handoff" "$share/hooks/"*.sh "$share/hooks/adapters/"*.sh 2>/dev/null || true
 
-  "$share/bin/cross-agent-handoff" _install-user-hooks "$share"
+  if [[ "$docker_mode" -eq 1 ]]; then
+    cah_write_docker_env "$share"
+    "$share/bin/cross-agent-handoff" _install-user-hooks-docker "$share"
+    echo "Docker: cd $share && docker compose up -d --build"
+    echo "CLI:    docker compose -f $share/docker-compose.yml exec cli -- init"
+  else
+    "$share/bin/cross-agent-handoff" _install-user-hooks "$share"
+  fi
 
   echo "Installed to $share"
   echo "CLI: $bin_dir/cross-agent-handoff (alias: cah)"
   echo "Run: cross-agent-handoff init  (inside a git repo)"
+}
+
+cah_write_docker_env() {
+  local share="$1"
+  local dir env_file
+  dir="$(cd "$share" 2>/dev/null && pwd)" || dir="$share"
+  env_file="$dir/.env"
+  [[ -f "$env_file" ]] && return 0
+  local uid gid home user
+  uid="$(id -u)"
+  gid="$(id -g)"
+  home="$HOME"
+  user="${USER:-$(id -un)}"
+  cat > "$env_file" <<EOF
+UID=${uid}
+GID=${gid}
+HOME=${home}
+USER=${user}
+CAH_ENABLE_CLIPBOARD=0
+COMPOSE_FILE=docker-compose.yml
+XDG_RUNTIME_DIR=/run/user/${uid}
+WAYLAND_DISPLAY=wayland-0
+DISPLAY=${DISPLAY:-:0}
+EOF
+}
+
+cah_docker_exec_cmd() {
+  local share="$1"
+  local event="$2"
+  local format="$3"
+  printf 'docker compose --project-directory %q exec -T cli -- hook %s %s' "$share" "$event" "$format"
+}
+
+cmd_install_user_hooks_docker() {
+  local share="$1"
+  local h_ss h_st h_se h_cs h_cc h_as h_ce
+  h_ss="$(cah_docker_exec_cmd "$share" session-start cursor)"
+  h_st="$(cah_docker_exec_cmd "$share" stop cursor)"
+  h_se="$(cah_docker_exec_cmd "$share" session-end cursor)"
+  h_cs="$(cah_docker_exec_cmd "$share" session-start claude)"
+  h_cc="$(cah_docker_exec_cmd "$share" stop claude)"
+  h_ce="$(cah_docker_exec_cmd "$share" session-end claude)"
+  h_xs="$(cah_docker_exec_cmd "$share" session-start codex)"
+  h_xt="$(cah_docker_exec_cmd "$share" stop codex)"
+  h_as="$(cah_docker_exec_cmd "$share" session-start antigravity-cli)"
+  h_ast="$(cah_docker_exec_cmd "$share" stop antigravity-cli)"
+  h_ae="$(cah_docker_exec_cmd "$share" session-end antigravity-cli)"
+
+  mkdir -p "$HOME/.cursor" "$HOME/.claude" "$HOME/.codex" "$HOME/.gemini/antigravity-cli" "$HOME/.cursor/skills/cross-agent-handoff"
+
+  cat > "$HOME/.cursor/hooks.json" <<EOF
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [{ "command": "$h_ss" }],
+    "stop": [{ "command": "$h_st", "loop_limit": 2 }],
+    "sessionEnd": [{ "command": "$h_se" }]
+  }
+}
+EOF
+
+  local claude_settings="$HOME/.claude/settings.json"
+  if command -v jq >/dev/null 2>&1 && [[ -f "$claude_settings" ]]; then
+    jq --arg ss "$h_cs" \
+       --arg st "$h_cc" \
+       --arg se "$h_ce" \
+       '.hooks = ((.hooks // {}) + {
+         "SessionStart": [{"hooks": [{"type": "command", "command": $ss, "timeout": 30}]}],
+         "Stop": [{"hooks": [{"type": "command", "command": $st, "timeout": 30}]}],
+         "SessionEnd": [{"hooks": [{"type": "command", "command": $se, "timeout": 15}]}]
+       })' "$claude_settings" > "${claude_settings}.tmp" && mv "${claude_settings}.tmp" "$claude_settings"
+  else
+    cat > "$claude_settings" <<EOF
+{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "$h_cs", "timeout": 30}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "$h_cc", "timeout": 30}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "$h_ce", "timeout": 15}]}]
+  }
+}
+EOF
+  fi
+
+  cat > "$HOME/.codex/hooks.json" <<EOF
+{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "startup|resume|clear|compact",
+      "hooks": [{
+        "type": "command",
+        "command": "$h_xs",
+        "statusMessage": "Loading cross-agent handoff"
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "$h_xt",
+        "timeout": 30,
+        "statusMessage": "Checking handoff"
+      }]
+    }]
+  }
+}
+EOF
+
+  cat > "$HOME/.gemini/antigravity-cli/settings.json" <<EOF
+{
+  "hooks": {
+    "enabled": true,
+    "SessionStart": [{
+      "matcher": "startup|resume|clear",
+      "hooks": [{
+        "name": "cross-agent-handoff-start",
+        "type": "command",
+        "command": "$h_as",
+        "timeout": 30000
+      }]
+    }],
+    "AfterAgent": [{
+      "matcher": "*",
+      "hooks": [{
+        "name": "cross-agent-handoff-after",
+        "type": "command",
+        "command": "$h_ast",
+        "timeout": 30000
+      }]
+    }],
+    "SessionEnd": [{
+      "matcher": "exit",
+      "hooks": [{
+        "name": "cross-agent-handoff-end",
+        "type": "command",
+        "command": "$h_ae",
+        "timeout": 15000
+      }]
+    }]
+  }
+}
+EOF
+
+  cat > "$HOME/.cursor/skills/cross-agent-handoff/SKILL.md" <<EOF
+---
+name: cross-agent-handoff
+description: Session handoff ritual — read and update .agent/SESSION.md when starting or stopping work.
+---
+# Cross Agent Handoff (Docker)
+
+Start daemon: \`cd ~/.local/share/cross-agent-handoff && docker compose up -d\`
+Hooks call \`docker compose exec cli -- hook …\` (see ~/.cursor/hooks.json).
+EOF
 }
 
 cmd_install_user_hooks() {
@@ -469,6 +633,7 @@ main() {
     install-global) cmd_install_global "$@" ;;
     hook) cmd_hook "$@" ;;
     _install-user-hooks) cmd_install_user_hooks "$@" ;;
+    _install-user-hooks-docker) cmd_install_user_hooks_docker "$@" ;;
     -h|--help|help|"") usage ;;
     *) echo "Unknown command: $cmd" >&2; usage; exit 1 ;;
   esac

@@ -1,0 +1,31 @@
+# Copy .env.example → .env, then:
+#   docker compose up -d --build
+#   docker compose exec cli -- init          # run from a git repo on the host
+#   docker compose exec cli -- export-for-project --clipboard
+#
+# Hooks (install-global --docker) call:
+#   docker compose --project-directory <share> exec -T cli -- hook …
+# Requires the daemon (up -d). Mounts $HOME so host paths in hook JSON match inside the container.
+
+services:
+  cli:
+    build: .
+    image: cross-agent-handoff:local
+    container_name: cross-agent-handoff
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: "${HOME}"
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+    stdin_open: true
+    tty: false
+    volumes:
+      - ${HOME}:${HOME}
+    environment:
+      CAH_ROOT: /opt/cross-agent-handoff
+      HOME: ${HOME}
+      USER: ${USER:-cah}
+      # Clipboard (wl-copy / wl-paste); paths come from .env
+      XDG_RUNTIME_DIR: ${XDG_RUNTIME_DIR:-/run/user/${UID:-1000}}
+      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-0}
+      DISPLAY: ${DISPLAY:-:0}
+      CAH_ENABLE_CLIPBOARD: ${CAH_ENABLE_CLIPBOARD:-0}

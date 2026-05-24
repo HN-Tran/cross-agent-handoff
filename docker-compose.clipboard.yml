@@ -1,0 +1,7 @@
+# Merged automatically when COMPOSE_FILE includes this file (see .env.example).
+
+services:
+  cli:
+    volumes:
+      - ${XDG_RUNTIME_DIR:-/run/user/${UID:-1000}}:${XDG_RUNTIME_DIR:-/run/user/${UID:-1000}}
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro

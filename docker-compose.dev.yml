@@ -1,0 +1,11 @@
+# Live-mount the tool source while developing cross-agent-handoff itself.
+#
+#   WORKSPACE=/path/to/some-git-repo docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm cli --help
+
+services:
+  cli:
+    volumes:
+      - ./bin:/opt/cross-agent-handoff/bin:ro
+      - ./lib:/opt/cross-agent-handoff/lib:ro
+      - ./hooks:/opt/cross-agent-handoff/hooks:ro
+      - ./templates:/opt/cross-agent-handoff/templates:ro
