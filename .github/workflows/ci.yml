@@ -15,7 +15,7 @@ jobs:
     name: Smoke (native CLI)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Install deps
         run: sudo apt-get update -qq && sudo apt-get install -y -qq jq python3 shellcheck git
@@ -30,7 +30,7 @@ jobs:
     name: Smoke (Docker Compose)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Prepare .env
         run: |
@@ -58,12 +58,12 @@ jobs:
           echo "# ci" > "${HOME}/ci-repo/README.md"
           git -C "${HOME}/ci-repo" add README.md
           git -C "${HOME}/ci-repo" commit -qm "init"
-          docker compose exec -T -w "${HOME}/ci-repo" cli -- init
+          docker compose exec -T -w "${HOME}/ci-repo" cli init
           test -f "${HOME}/ci-repo/.agent/SESSION.md"
 
       - name: Hook via exec
         run: |
-          OUT=$(echo '{"cwd":"'"${HOME}/ci-repo"'"}' | docker compose exec -T cli -- hook session-start cursor)
+          OUT=$(echo '{"cwd":"'"${HOME}/ci-repo"'"}' | docker compose exec -T cli hook session-start cursor)
           echo "$OUT" | jq -e '.additional_context | length > 0'
 
       - name: Tear down

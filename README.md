@@ -54,7 +54,7 @@ Alias: `cah`
 cd ~/.local/share/cross-agent-handoff
 docker compose up -d --build
 
-docker compose exec -w "$HOME/GitHub/your-repo" cli -- init
+docker compose exec -w "$HOME/GitHub/your-repo" cli init
 ```
 
 See [`.env.example`](.env.example) for `HOME`, `UID`, `GID`, and optional clipboard (`COMPOSE_FILE=...clipboard.yml`).
