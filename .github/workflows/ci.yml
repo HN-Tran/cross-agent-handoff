@@ -58,12 +58,12 @@ jobs:
           echo "# ci" > "${HOME}/ci-repo/README.md"
           git -C "${HOME}/ci-repo" add README.md
           git -C "${HOME}/ci-repo" commit -qm "init"
-          docker compose exec -T -w "${HOME}/ci-repo" cli init
+          docker compose exec -T -w "${HOME}/ci-repo" cli cah init
           test -f "${HOME}/ci-repo/.agent/SESSION.md"
 
       - name: Hook via exec
         run: |
-          OUT=$(echo '{"cwd":"'"${HOME}/ci-repo"'"}' | docker compose exec -T cli hook session-start cursor)
+          OUT=$(echo '{"cwd":"'"${HOME}/ci-repo"'"}' | docker compose exec -T cli cah hook session-start cursor)
           echo "$OUT" | jq -e '.additional_context | length > 0'
 
       - name: Tear down

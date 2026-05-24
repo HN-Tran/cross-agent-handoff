@@ -324,7 +324,7 @@ cmd_install_global() {
     cah_write_docker_env "$share"
     "$share/bin/cross-agent-handoff" _install-user-hooks-docker "$share"
     echo "Docker: cd $share && docker compose up -d --build"
-    echo "CLI:    docker compose -f $share/docker-compose.yml exec cli init"
+    echo "CLI:    docker compose -f $share/docker-compose.yml exec cli cah init"
   else
     "$share/bin/cross-agent-handoff" _install-user-hooks "$share"
   fi
@@ -362,7 +362,7 @@ cah_docker_exec_cmd() {
   local share="$1"
   local event="$2"
   local format="$3"
-  printf 'docker compose --project-directory %q exec -T cli hook %s %s' "$share" "$event" "$format"
+  printf 'docker compose --project-directory %q exec -T cli cah hook %s %s' "$share" "$event" "$format"
 }
 
 cmd_install_user_hooks_docker() {
@@ -481,7 +481,7 @@ description: Session handoff ritual — read and update .agent/SESSION.md when s
 # Cross Agent Handoff (Docker)
 
 Start daemon: \`cd ~/.local/share/cross-agent-handoff && docker compose up -d\`
-Hooks call \`docker compose exec cli hook …\` (see ~/.cursor/hooks.json).
+Hooks call \`docker compose exec cli cah hook …\` (see ~/.cursor/hooks.json).
 EOF
 }
 

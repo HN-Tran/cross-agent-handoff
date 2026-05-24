@@ -1,10 +1,11 @@
 # Copy .env.example → .env, then:
 #   docker compose up -d --build
-#   docker compose exec cli init
-#   docker compose exec cli export-for-project --clipboard
+#   docker compose exec cli cah init
+#   docker compose exec cli cah export-for-project --clipboard
 #
 # Hooks (install-global --docker) call:
-#   docker compose --project-directory <share> exec -T cli hook …
+#   docker compose --project-directory <share> exec -T cli cah hook …
+# (Use `cah`, not bare `init` — exec bypasses entrypoint and would run /sbin/init.)
 # Requires the daemon (up -d). Mounts $HOME so host paths in hook JSON match inside the container.
 
 services:

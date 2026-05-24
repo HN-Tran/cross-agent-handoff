@@ -20,7 +20,9 @@ COPY hooks/ hooks/
 COPY templates/ templates/
 
 RUN chmod +x bin/cross-agent-handoff \
-    && chmod +x hooks/*.sh hooks/adapters/*.sh
+    && chmod +x hooks/*.sh hooks/adapters/*.sh \
+    && ln -sf /opt/cross-agent-handoff/bin/cross-agent-handoff /usr/local/bin/cah \
+    && ln -sf /opt/cross-agent-handoff/bin/cross-agent-handoff /usr/local/bin/cross-agent-handoff
 
 COPY docker/entrypoint.sh /usr/local/bin/cah-entrypoint
 RUN chmod +x /usr/local/bin/cah-entrypoint
