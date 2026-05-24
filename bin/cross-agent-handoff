@@ -1,0 +1,477 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CAH_ROOT=""
+_script="${BASH_SOURCE[0]}"
+while [[ -L "$_script" ]]; do
+  _dir="$(cd "$(dirname "$_script")" && pwd)"
+  _script="$(readlink "$_script")"
+  [[ "$_script" != /* ]] && _script="$_dir/$_script"
+done
+SCRIPT_DIR="$(cd "$(dirname "$_script")" && pwd)"
+# shellcheck source=../lib/common.sh
+source "$SCRIPT_DIR/../lib/common.sh"
+cah_resolve_root
+
+usage() {
+  cat <<EOF
+cross-agent-handoff — pass session state across AI coding tools
+
+Usage:
+  cross-agent-handoff init [--web-mode] [DIR]
+  cross-agent-handoff capture [--tool NAME] [--transcript PATH]
+  cross-agent-handoff export-for-project [--clipboard]
+  cross-agent-handoff import --from-clipboard | --from-file PATH
+  cross-agent-handoff digest
+  cross-agent-handoff install-global [--link]
+  cross-agent-handoff hook <event> <format>   # internal: for lifecycle hooks
+
+Events: session-start | stop | session-end | archive
+Formats: cursor | claude | codex | antigravity-cli | antigravity-desktop | plain
+EOF
+}
+
+cmd_init() {
+  local web_mode=0
+  local target="."
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --web-mode) web_mode=1; shift ;;
+      -*) echo "Unknown option: $1" >&2; exit 1 ;;
+      *) target="$1"; shift ;;
+    esac
+  done
+
+  local git_root
+  git_root="$(cah_find_git_root "$target")" || {
+    echo "Not a git repository: $target" >&2
+    exit 1
+  }
+
+  local agent_dir templates
+  agent_dir="$(cah_agent_dir "$git_root")"
+  templates="$CAH_ROOT/templates"
+  mkdir -p "$agent_dir/archive"
+
+  if [[ ! -f "$(cah_session_file "$git_root")" ]]; then
+    cp "$templates/SESSION.md" "$(cah_session_file "$git_root")"
+    echo "Created $(cah_session_file "$git_root")"
+  fi
+
+  local gitignore="$git_root/.gitignore"
+  if [[ "$web_mode" -eq 0 ]]; then
+    if [[ -f "$gitignore" ]]; then
+      if ! grep -q '^\.agent/$' "$gitignore" 2>/dev/null && ! grep -q '^\.agent$' "$gitignore" 2>/dev/null; then
+        printf '\n# cross-agent-handoff WIP session state\n.agent/\n' >> "$gitignore"
+      fi
+    else
+      printf '# cross-agent-handoff WIP session state\n.agent/\n' > "$gitignore"
+    fi
+  fi
+
+  # AGENTS.md section
+  local agents_md="$git_root/AGENTS.md"
+  if [[ ! -f "$agents_md" ]]; then
+    if [[ -f "$git_root/CLAUDE.md" && ! -L "$git_root/CLAUDE.md" ]]; then
+      cp "$git_root/CLAUDE.md" "$agents_md"
+      echo "Created AGENTS.md from CLAUDE.md"
+    else
+      echo "# Project" > "$agents_md"
+      echo "Created AGENTS.md"
+    fi
+  fi
+  if ! grep -q '## Session continuity' "$agents_md" 2>/dev/null; then
+    printf '\n%s\n' "$(cah_handoff_section)" >> "$agents_md"
+    echo "Appended Session continuity section to AGENTS.md"
+  fi
+
+  if [[ -f "$git_root/CLAUDE.md" && ! -L "$git_root/CLAUDE.md" ]]; then
+    if [[ -f "$agents_md" ]] && ! cmp -s "$git_root/CLAUDE.md" "$agents_md" 2>/dev/null; then
+      echo "Keeping CLAUDE.md (differs from AGENTS.md); symlink manually if desired"
+    else
+      rm -f "$git_root/CLAUDE.md"
+      ln -sf AGENTS.md "$git_root/CLAUDE.md"
+      echo "Symlinked CLAUDE.md -> AGENTS.md"
+    fi
+  elif [[ ! -e "$git_root/CLAUDE.md" ]]; then
+    ln -sf AGENTS.md "$git_root/CLAUDE.md"
+    echo "Symlinked CLAUDE.md -> AGENTS.md"
+  fi
+
+  if [[ ! -e "$git_root/GEMINI.md" ]]; then
+    ln -sf AGENTS.md "$git_root/GEMINI.md"
+    echo "Symlinked GEMINI.md -> AGENTS.md"
+  fi
+
+  # Repo-level hook stubs for cloud (Tier B)
+  mkdir -p "$git_root/.cursor/hooks" "$git_root/.claude" "$git_root/.codex" "$git_root/.agents"
+  local share="${CAH_INSTALL:-$HOME/.local/share/cross-agent-handoff}"
+
+  cat > "$git_root/.cursor/hooks.json" <<EOF
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [{ "command": "$share/hooks/adapters/cursor-session-start.sh" }],
+    "stop": [{ "command": "$share/hooks/adapters/cursor-stop.sh", "loop_limit": 2 }],
+    "sessionEnd": [{ "command": "$share/hooks/adapters/cursor-session-end.sh" }]
+  }
+}
+EOF
+
+  cat > "$git_root/.claude/settings.json" <<EOF
+{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "$share/hooks/adapters/claude-session-start.sh",
+        "timeout": 10
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "$share/hooks/adapters/claude-stop.sh",
+        "timeout": 15
+      }]
+    }],
+    "SessionEnd": [{
+      "hooks": [{
+        "type": "command",
+        "command": "$share/hooks/adapters/claude-session-end.sh",
+        "timeout": 5
+      }]
+    }]
+  }
+}
+EOF
+
+  cat > "$git_root/.codex/hooks.json" <<EOF
+{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "startup|resume|clear|compact",
+      "hooks": [{
+        "type": "command",
+        "command": "$share/hooks/adapters/codex-session-start.sh",
+        "statusMessage": "Loading cross-agent handoff"
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "$share/hooks/adapters/codex-stop.sh",
+        "timeout": 15,
+        "statusMessage": "Checking handoff"
+      }]
+    }]
+  }
+}
+EOF
+
+  cat > "$git_root/.agents/hooks.json" <<EOF
+{
+  "cross-agent-handoff": {
+    "PreInvocation": [{
+      "type": "command",
+      "command": "$share/hooks/adapters/antigravity-desktop-preinvocation.sh",
+      "timeout": 10
+    }],
+    "Stop": [{
+      "type": "command",
+      "command": "$share/hooks/adapters/antigravity-desktop-stop.sh",
+      "timeout": 15
+    }]
+  }
+}
+EOF
+
+  echo "Initialized cross-agent-handoff in $git_root"
+  if [[ "$web_mode" -eq 1 ]]; then
+    echo "Web mode: .agent/ is NOT gitignored — commit SESSION.md when switching to cloud agents."
+  fi
+}
+
+cmd_capture() {
+  local tool="unknown" transcript=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --tool) tool="$2"; shift 2 ;;
+      --transcript) transcript="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  local git_root
+  git_root="$(cah_find_git_root "$(pwd)")" || exit 1
+  cah_capture_state "$git_root" "$tool" "$transcript"
+  echo "Captured state -> $(cah_state_file "$git_root")"
+}
+
+cmd_export_for_project() {
+  local clipboard=0
+  [[ "${1:-}" == "--clipboard" ]] && clipboard=1
+  local git_root
+  git_root="$(cah_find_git_root "$(pwd)")" || exit 1
+  cah_strip_brief "$git_root"
+  local brief
+  brief="$(cah_brief_file "$git_root")"
+  echo "Wrote $brief"
+  if [[ "$clipboard" -eq 1 ]]; then
+    if command -v wl-copy >/dev/null 2>&1; then
+      wl-copy < "$brief"
+      echo "Copied to clipboard (wl-copy)"
+    elif command -v xclip >/dev/null 2>&1; then
+      xclip -selection clipboard < "$brief"
+      echo "Copied to clipboard (xclip)"
+    else
+      cat "$brief"
+      echo "(clipboard unavailable — output above)"
+    fi
+  fi
+}
+
+cmd_import() {
+  local source=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --from-clipboard) source="clipboard"; shift ;;
+      --from-file) source="file"; file_path="$2"; shift 2 ;;
+      *) echo "Unknown: $1" >&2; exit 1 ;;
+    esac
+  done
+  local text git_root session
+  git_root="$(cah_find_git_root "$(pwd)")" || exit 1
+  session="$(cah_session_file "$git_root")"
+
+  case "$source" in
+    clipboard)
+      if command -v wl-paste >/dev/null 2>&1; then
+        text="$(wl-paste)"
+      elif command -v xclip >/dev/null 2>&1; then
+        text="$(xclip -selection clipboard -o)"
+      else
+        echo "No clipboard tool found" >&2
+        exit 1
+      fi
+      ;;
+    file)
+      text="$(cat "$file_path")"
+      ;;
+    *)
+      echo "Specify --from-clipboard or --from-file PATH" >&2
+      exit 1
+      ;;
+  esac
+
+  cah_parse_handoff_from_text "$text" "$session"
+  cah_capture_state "$git_root" "import" ""
+  echo "Imported handoff -> $session"
+}
+
+cmd_digest() {
+  local git_root state_file archive session
+  git_root="$(cah_find_git_root "$(pwd)")" || exit 1
+  state_file="$(cah_state_file "$git_root")"
+  session="$(cah_session_file "$git_root")"
+
+  local archive_path=""
+  if [[ -f "$state_file" ]] && command -v jq >/dev/null 2>&1; then
+    archive_path="$(jq -r '.archive_path // empty' "$state_file")"
+  fi
+  if [[ -n "$archive_path" && -f "$git_root/$archive_path" ]]; then
+    echo "Latest archive: $git_root/$archive_path"
+    echo "Open this file to extract details for ## Context digest in SESSION.md"
+    tail -n 40 "$git_root/$archive_path" 2>/dev/null || true
+  else
+    local latest
+    latest="$(find "$(cah_agent_dir "$git_root")/archive" -type f 2>/dev/null | sort | tail -1)"
+    if [[ -n "$latest" ]]; then
+      echo "Archive: $latest"
+      tail -n 40 "$latest" 2>/dev/null || true
+    else
+      echo "No archive found. Update ## Context digest in SESSION.md manually after each session."
+    fi
+  fi
+}
+
+cmd_install_global() {
+  local link=0
+  [[ "${1:-}" == "--link" ]] && link=1
+  local share="$HOME/.local/share/cross-agent-handoff"
+  local bin_dir="$HOME/.local/bin"
+  mkdir -p "$bin_dir"
+
+  if [[ "$link" -eq 1 ]]; then
+    rm -rf "$share"
+    ln -sfn "$CAH_ROOT" "$share"
+  else
+    mkdir -p "$share"
+    rsync -a --delete "$CAH_ROOT/" "$share/" 2>/dev/null || cp -a "$CAH_ROOT/." "$share/"
+  fi
+
+  ln -sfn "$share/bin/cross-agent-handoff" "$bin_dir/cross-agent-handoff"
+  ln -sfn "$share/bin/cross-agent-handoff" "$bin_dir/cah" 2>/dev/null || true
+  chmod +x "$share/bin/cross-agent-handoff" "$share/hooks/"*.sh "$share/hooks/adapters/"*.sh 2>/dev/null || true
+
+  "$share/bin/cross-agent-handoff" _install-user-hooks "$share"
+
+  echo "Installed to $share"
+  echo "CLI: $bin_dir/cross-agent-handoff (alias: cah)"
+  echo "Run: cross-agent-handoff init  (inside a git repo)"
+}
+
+cmd_install_user_hooks() {
+  local share="$1"
+  mkdir -p "$HOME/.cursor" "$HOME/.claude" "$HOME/.codex" "$HOME/.gemini/antigravity-cli" "$HOME/.cursor/skills/cross-agent-handoff"
+
+  # Cursor global hooks — merge if exists
+  local cursor_hooks="$HOME/.cursor/hooks.json"
+  cat > "$cursor_hooks" <<EOF
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [{ "command": "$share/hooks/adapters/cursor-session-start.sh" }],
+    "stop": [{ "command": "$share/hooks/adapters/cursor-stop.sh", "loop_limit": 2 }],
+    "sessionEnd": [{ "command": "$share/hooks/adapters/cursor-session-end.sh" }]
+  }
+}
+EOF
+
+  # Claude — merge with existing settings if present
+  local claude_settings="$HOME/.claude/settings.json"
+  if command -v jq >/dev/null 2>&1 && [[ -f "$claude_settings" ]]; then
+    jq --arg ss "$share/hooks/adapters/claude-session-start.sh" \
+       --arg st "$share/hooks/adapters/claude-stop.sh" \
+       --arg se "$share/hooks/adapters/claude-session-end.sh" \
+       '.hooks = ((.hooks // {}) + {
+         "SessionStart": [{"hooks": [{"type": "command", "command": $ss, "timeout": 10}]}],
+         "Stop": [{"hooks": [{"type": "command", "command": $st, "timeout": 15}]}],
+         "SessionEnd": [{"hooks": [{"type": "command", "command": $se, "timeout": 5}]}]
+       })' "$claude_settings" > "${claude_settings}.tmp" && mv "${claude_settings}.tmp" "$claude_settings"
+  else
+    cat > "$claude_settings" <<EOF
+{
+  "enabledPlugins": {},
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "$share/hooks/adapters/claude-session-start.sh", "timeout": 10}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "$share/hooks/adapters/claude-stop.sh", "timeout": 15}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "$share/hooks/adapters/claude-session-end.sh", "timeout": 5}]}]
+  }
+}
+EOF
+  fi
+
+  cat > "$HOME/.codex/hooks.json" <<EOF
+{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "startup|resume|clear|compact",
+      "hooks": [{
+        "type": "command",
+        "command": "$share/hooks/adapters/codex-session-start.sh",
+        "statusMessage": "Loading cross-agent handoff"
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "$share/hooks/adapters/codex-stop.sh",
+        "timeout": 15,
+        "statusMessage": "Checking handoff"
+      }]
+    }]
+  }
+}
+EOF
+
+  mkdir -p "$HOME/.codex"
+  if [[ ! -f "$HOME/.codex/AGENTS.md" ]]; then
+    cat > "$HOME/.codex/AGENTS.md" <<EOF
+# Global Codex instructions
+
+When working in a repo with \`.agent/SESSION.md\`, read it before starting work.
+On stop, update SESSION.md with goal, progress, next steps, decisions, blockers, and context digest.
+EOF
+  fi
+
+  # Antigravity CLI settings (Gemini-compatible hooks)
+  mkdir -p "$HOME/.gemini/antigravity-cli"
+  cat > "$HOME/.gemini/antigravity-cli/settings.json" <<EOF
+{
+  "hooks": {
+    "enabled": true,
+    "SessionStart": [{
+      "matcher": "startup|resume|clear",
+      "hooks": [{
+        "name": "cross-agent-handoff-start",
+        "type": "command",
+        "command": "$share/hooks/adapters/antigravity-cli-session-start.sh",
+        "timeout": 10000
+      }]
+    }],
+    "AfterAgent": [{
+      "matcher": "*",
+      "hooks": [{
+        "name": "cross-agent-handoff-after",
+        "type": "command",
+        "command": "$share/hooks/adapters/antigravity-cli-stop.sh",
+        "timeout": 15000
+      }]
+    }],
+    "SessionEnd": [{
+      "matcher": "exit",
+      "hooks": [{
+        "name": "cross-agent-handoff-end",
+        "type": "command",
+        "command": "$share/hooks/adapters/antigravity-cli-session-end.sh",
+        "timeout": 5000
+      }]
+    }]
+  }
+}
+EOF
+
+  cat > "$HOME/.cursor/skills/cross-agent-handoff/SKILL.md" <<EOF
+---
+name: cross-agent-handoff
+description: Session handoff ritual — read and update .agent/SESSION.md when starting or stopping work.
+---
+# Cross Agent Handoff
+
+Before doing work: read \`.agent/SESSION.md\` if it exists.
+Before stopping: update \`.agent/SESSION.md\` with Goal, Progress, Next steps, Decisions, Blockers, Context digest.
+Do not restart from scratch when SESSION.md exists.
+EOF
+}
+
+cmd_hook() {
+  local event="${1:-}" format="${2:-plain}"
+  shift 2 || true
+  case "$event" in
+    session-start) exec "$CAH_ROOT/hooks/session-start.sh" "$format" ;;
+    stop) exec "$CAH_ROOT/hooks/stop-enforce-handoff.sh" "$format" ;;
+    session-end) exec "$CAH_ROOT/hooks/session-end.sh" "$format" ;;
+    archive) exec "$CAH_ROOT/hooks/archive-transcript.sh" "$format" ;;
+    *) echo "Unknown hook event: $event" >&2; exit 1 ;;
+  esac
+}
+
+main() {
+  local cmd="${1:-}"
+  shift || true
+  case "$cmd" in
+    init) cmd_init "$@" ;;
+    capture) cmd_capture "$@" ;;
+    export-for-project) cmd_export_for_project "$@" ;;
+    import) cmd_import "$@" ;;
+    digest) cmd_digest "$@" ;;
+    install-global) cmd_install_global "$@" ;;
+    hook) cmd_hook "$@" ;;
+    _install-user-hooks) cmd_install_user_hooks "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) echo "Unknown command: $cmd" >&2; usage; exit 1 ;;
+  esac
+}
+
+main "$@"
